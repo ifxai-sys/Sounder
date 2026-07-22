@@ -1,36 +1,63 @@
-// Resend HTTPS API — no SMTP ports involved at all, so Render's free-plan
-// port blocking (25, 465, 587) is a non-issue. Also sidesteps the Gmail
-// freemail/DKIM/DMARC alignment problem you'd hit trying to send "from"
-// a gmail.com address through a third-party relay.
+// Gmail API (OAuth2) — sends real email through your own Gmail account
+// (ifxai921@gmail.com), using Google's own infrastructure. No domain
+// verification needed, no SMTP ports involved (pure HTTPS, so Render's
+// port blocking is a non-issue), and it can send to ANY recipient
+// immediately — not limited to a sandbox/test address like Resend was.
 //
-// Set this in your .env / Render environment variables:
-//   RESEND_API_KEY=your_resend_api_key
-//
-// EMAIL_FROM is optional — if unset, falls back to Resend's shared,
-// pre-verified test sender (onboarding@resend.dev), which works out of
-// the box on the free tier without verifying your own domain.
+// Set these in your .env / Render environment variables:
+//   GMAIL_USER=ifxai921@gmail.com
+//   GMAIL_CLIENT_ID=...          (from the "Sounder Web" OAuth client)
+//   GMAIL_CLIENT_SECRET=...      (from the same OAuth client)
+//   GMAIL_REFRESH_TOKEN=...      (generated once via OAuth Playground)
 
-const RESEND_API_URL = "https://api.resend.com/emails";
-const FROM_ADDRESS = process.env.EMAIL_FROM || "onboarding@resend.dev";
+const { OAuth2Client } = require("google-auth-library");
+
+const gmailOAuth2Client = new OAuth2Client(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET
+);
+gmailOAuth2Client.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
+
+// Base64url-encode a raw RFC 2822 email so it can be handed to the
+// Gmail API's messages.send endpoint.
+const buildRawMessage = ({ to, subject, html }) => {
+    const from = process.env.GMAIL_USER;
+    const messageParts = [
+        `From: "Sounder" <${from}>`,
+        `To: ${to}`,
+        `Subject: =?utf-8?B?${Buffer.from(subject, "utf-8").toString("base64")}?=`,
+        "MIME-Version: 1.0",
+        "Content-Type: text/html; charset=utf-8",
+        "",
+        html
+    ];
+    const message = messageParts.join("\r\n");
+
+    return Buffer.from(message)
+        .toString("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/, "");
+};
 
 const sendEmail = async ({ to, subject, html }) => {
-    const response = await fetch(RESEND_API_URL, {
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
-            "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-            from: `Sounder <${FROM_ADDRESS}>`,
-            to: [to],
-            subject,
-            html
-        })
-    });
+    const { token: accessToken } = await gmailOAuth2Client.getAccessToken();
+
+    const response = await fetch(
+        "https://www.googleapis.com/gmail/v1/users/me/messages/send",
+        {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${accessToken}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ raw: buildRawMessage({ to, subject, html }) })
+        }
+    );
 
     if (!response.ok) {
         const errorBody = await response.text();
-        throw new Error(`Resend API error (${response.status}): ${errorBody}`);
+        throw new Error(`Gmail API error (${response.status}): ${errorBody}`);
     }
 
     return response.json();
