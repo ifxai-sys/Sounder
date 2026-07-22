@@ -1,33 +1,43 @@
-const nodemailer = require("nodemailer");
-
-// Real SMTP — but on port 2525 instead of the usual 465/587.
-// Why: Render's free plan blocks outbound traffic on ports 25, 465, and 587
-// to prevent spam abuse. Port 2525 is NOT on that blocked list, and most
-// SMTP relay providers (Mailgun, SendGrid, SMTP2GO, Elastic Email, etc.)
-// support sending over 2525 specifically for this reason. Gmail itself only
-// offers 465/587, so Gmail cannot be used here on the free Render plan —
-// this only works with a provider that explicitly supports port 2525.
+// Resend HTTPS API — no SMTP ports involved at all, so Render's free-plan
+// port blocking (25, 465, 587) is a non-issue. Also sidesteps the Gmail
+// freemail/DKIM/DMARC alignment problem you'd hit trying to send "from"
+// a gmail.com address through a third-party relay.
 //
-// Set these in your .env / Render environment variables:
-//   SMTP_HOST=smtp.your-provider.com   (from whichever provider you sign up with)
-//   SMTP_PORT=2525
-//   SMTP_USER=your_smtp_username
-//   SMTP_PASS=your_smtp_password_or_key
-//   EMAIL_FROM=an_email_address_verified_with_that_provider
+// Set this in your .env / Render environment variables:
+//   RESEND_API_KEY=your_resend_api_key
+//
+// EMAIL_FROM is optional — if unset, falls back to Resend's shared,
+// pre-verified test sender (onboarding@resend.dev), which works out of
+// the box on the free tier without verifying your own domain.
 
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT) || 2525,
-    secure: false, // port 2525 uses STARTTLS, not implicit SSL
-    auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+const RESEND_API_URL = "https://api.resend.com/emails";
+const FROM_ADDRESS = process.env.EMAIL_FROM || "onboarding@resend.dev";
+
+const sendEmail = async ({ to, subject, html }) => {
+    const response = await fetch(RESEND_API_URL, {
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            from: `Sounder <${FROM_ADDRESS}>`,
+            to: [to],
+            subject,
+            html
+        })
+    });
+
+    if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`Resend API error (${response.status}): ${errorBody}`);
     }
-});
+
+    return response.json();
+};
 
 const sendResetPasswordEmail = async (toEmail, resetUrl) => {
-    await transporter.sendMail({
-        from: `"Sounder" <${process.env.EMAIL_FROM}>`,
+    await sendEmail({
         to: toEmail,
         subject: "Reset your Sounder password",
         html: `
@@ -46,8 +56,7 @@ const sendResetPasswordEmail = async (toEmail, resetUrl) => {
 };
 
 const sendOtpEmail = async (toEmail, code) => {
-    await transporter.sendMail({
-        from: `"Sounder" <${process.env.EMAIL_FROM}>`,
+    await sendEmail({
         to: toEmail,
         subject: `${code} is your Sounder verification code`,
         html: `
